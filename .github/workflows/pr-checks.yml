@@ -1,0 +1,55 @@
+#
+# .github/workflows/pr-checks.yml
+#
+---
+name: pr-checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android
+
+    # https://github.com/actions/runner-images#available-images
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt update && sudo apt install just
+          just --version
+          just tools
+
+  rust:
+    name: rust-quickstart
+    strategy:
+      matrix:
+        os: ["macos-latest", "ubuntu-latest"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Clippy
+        run: "(cd rust-tui; cargo clippy)"
+
+      - name: Build
+        run: "(cd rust-tui; cargo build)"
