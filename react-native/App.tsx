@@ -130,24 +130,18 @@ const App = () => {
       ditto.current = new Ditto(identity);
 
       // Initialize transport config
-      {
-        const transportsConfig = new TransportConfig();
-        transportsConfig.peerToPeer.bluetoothLE.isEnabled = true;
-        transportsConfig.peerToPeer.lan.isEnabled = true;
+      ditto.current.updateTransportConfig(config => {
+        config.connect.websocketURLs = [DITTO_WEBSOCKET_URL];
 
-        if (Platform.OS === 'ios') {
-          transportsConfig.peerToPeer.awdl.isEnabled = true;
+        if (Platform.OS === 'android') {
+          config.peerToPeer.awdl.isEnabled = false;
         }
 
-        if (typeof DITTO_WEBSOCKET_URL === 'string' && DITTO_WEBSOCKET_URL.length > 0) {
-          transportsConfig.connect.websocketURLs.push(DITTO_WEBSOCKET_URL);
-        }
-
-        ditto.current.setTransportConfig(transportsConfig);
-      }
+        return config;
+      });
 
       ditto.current.startSync();
-      
+
       // Register a subscription, which determines what data syncs to this peer
       // https://docs.ditto.live/sdk/latest/sync/syncing-data#creating-subscriptions
       taskSubscription.current = ditto.current.sync.registerSubscription('SELECT * FROM tasks');
