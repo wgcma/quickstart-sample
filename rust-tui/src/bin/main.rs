@@ -109,6 +109,7 @@ async fn try_init_ditto(
             false, // This is required to be set to false to use the correct URLs
             Some(custom_auth_url.as_str())
         ))?
+        .with_minimum_log_level(dittolive_ditto::LogLevel::Debug)
         .build()?;
 
     ditto.update_transport_config(|config| {

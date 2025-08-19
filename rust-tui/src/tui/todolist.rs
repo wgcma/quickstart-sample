@@ -42,6 +42,7 @@ pub struct Todolist {
 
     /// Table scrolling state
     pub table_state: TableState,
+    pub find_table_state: TableState,
 
     /// Holds the contents of a "new todo" dialog
     ///
@@ -51,7 +52,15 @@ pub struct Todolist {
 
     /// Holds the contents of an existing TODO title to be edited
     pub edit_task: Option<(String, String)>, // (ID, title)
+
+    /// Holds the contents of the string to search for in the dialog
+    pub find_task: Option<String>,
+
+    find_results: Vec<TodoItem>,
+    find_mode: bool,
+    find_input_mode: bool,
 }
+
 
 /// Mode enum used to decide how to interpret keystrokes
 #[derive(Debug)]
@@ -59,6 +68,7 @@ pub enum TodoMode {
     Normal,
     CreateTask { buffer: String },
     EditTask { id: String, buffer: String },
+    FindTask { buffer: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,26 +123,28 @@ impl Todolist {
             mode: TodoMode::Normal,
             create_task_title: None,
             edit_task: None,
+            find_task: None,
+            find_results: Vec::new(),
+            find_mode: false,
+            find_input_mode: false,
+            find_table_state: Default::default(),
         })
     }
 
-    /// Top-level render function for the Todolist
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         self.render_todo_table(area, buf);
-        self.render_new_todo_prompt(area, buf);
+        if !self.find_input_mode {
+            self.render_new_todo_prompt(area, buf);
+        } else {
+            self.render_find_todo_prompt(area, buf);
+        }
     }
 
     /// Render a table displaying each todo and its current status
     fn render_todo_table(&mut self, area: Rect, buf: &mut Buffer) {
-        let tasks = self.tasks_rx.borrow().clone();
-
-        let header = ["Done".bold(), "Title".bold()]
-            .into_iter()
-            .map(Cell::from)
-            .collect::<Row>();
-        let rows = tasks
-            .iter()
-            .map(|doc| {
+        let tasks  = self.tasks_rx.borrow().clone();
+        let rows = if self.find_mode {
+            self.find_results.iter().map(|doc| {
                 let done = doc.done;
                 let done = if done { " ✅ " } else { " ☐ " };
                 let title = &doc.title;
@@ -143,8 +155,34 @@ impl Todolist {
                 ]
                 .into_iter()
                 .collect::<Row>()
-            })
-            .collect::<Vec<_>>();
+            }).collect::<Vec<_>>()
+        } else {
+            tasks.iter()
+                .map(|doc| {
+                    let done = doc.done;
+                    let done = if done { " ✅ " } else { " ☐ " };
+                    let title = &doc.title;
+
+                    [
+                        Cell::from(Text::from(done.to_string())),
+                        Cell::from(Text::raw(title)),
+                    ]
+                    .into_iter()
+                    .collect::<Row>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut table_state_to_use = if self.find_mode {
+            self.find_table_state.clone()
+        } else {
+            self.table_state.clone()
+        };
+
+        let header = ["Done".bold(), "Title".bold()]
+            .into_iter()
+            .map(Cell::from)
+            .collect::<Row>();
 
         let sync_state = if self.ditto.is_sync_active() {
             " 🟢 Sync Active ".green()
@@ -164,9 +202,9 @@ impl Todolist {
                     .border_type(BorderType::Rounded)
                     .title_top(Line::raw(" Tasks (j↓, k↑, ⏎ toggle done) ").left_aligned())
                     .title_top(sync_line.right_aligned())
-                    .title_bottom(" (c: create) (d: delete) (e: edit) (q: quit) "),
+                    .title_bottom(" (c: create) (d: delete) (e: edit) (f: find) (esc: reset) (q: quit) "),
             );
-        StatefulWidget::render(table, area, buf, &mut self.table_state);
+        StatefulWidget::render(table, area, buf, &mut table_state_to_use);
     }
 
     /// Render "new todo" prompt if `create_task_title` is "Some"
@@ -191,6 +229,27 @@ impl Todolist {
         Line::raw(title).render(space, buf);
     }
 
+    // Add render search. Looks slightly different compared to render_new_todo_prompt
+    fn render_find_todo_prompt(&self, area: Rect, buf: &mut Buffer) {
+        let title = match &self.mode {
+            TodoMode::FindTask { buffer } => buffer,
+            _ => {
+                return;
+            }
+        };
+
+        let space = area.inner(Margin::new(2, 2));
+        Clear.render(space, buf);
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(" Input: ")
+            .title_bottom(" (Esc: back) ")
+            .padding(Padding::uniform(1))
+            .render(space, buf);
+        let space = space.inner(Margin::new(2, 2));
+        Line::raw(title).render(space, buf);
+    }
+
     /// Apply a terminal event to update the todolist state
     pub async fn try_handle_event(&mut self, event: &Event) -> Result<EventResult> {
         match (&mut self.mode, event) {
@@ -204,37 +263,59 @@ impl Todolist {
             (TodoMode::Normal, key!(Char('d'))) => {
                 self.try_delete_task().await?;
             }
+
             // Normal:e -> Goto edit mode
+
             (TodoMode::Normal, key!(Char('e'))) => {
                 let selected = self
                     .table_state
                     .selected()
                     .context("failed to get selected index")?;
-                let item = self
-                    .tasks_rx
+
+                let item = if self.find_mode {
+                    self.find_results
+                    .get(selected)
+                    .cloned()
+                    .context("failed to get todo from list")?
+                } else {
+                    self.tasks_rx
                     .borrow()
                     .get(selected)
                     .cloned()
-                    .context("failed to get todo from list")?;
+                    .context("failed to get todo from list")?
+                };
                 self.mode = TodoMode::EditTask {
                     id: item.id.to_string(),
                     buffer: item.title.to_string(),
                 };
             }
+
+            (TodoMode::Normal { .. } | TodoMode::FindTask { .. }, key!(Char('f'))) => {
+                self.find_mode = false;
+                self.find_input_mode = true;
+                self.mode = TodoMode::FindTask {
+                    buffer: String::new(),
+                };
+            }
+            // Normal
             (TodoMode::Normal, key!(Char('s'))) => {
                 self.toggle_sync()?;
             }
             // Non-Normal:Esc -> Normal
-            (TodoMode::CreateTask { .. } | TodoMode::EditTask { .. }, key!(Esc)) => {
+            (TodoMode::Normal { .. } | TodoMode::CreateTask { .. } | TodoMode::EditTask { .. } | TodoMode::FindTask { .. }, key!(Esc)) => {
+                self.find_mode = false;
                 self.mode = TodoMode::Normal;
             }
+
             // Scroll up
             (TodoMode::Normal, key!(Up) | key!(Char('k'))) => {
                 self.table_state.select_previous();
+                self.find_table_state.select_previous();
             }
             // Scroll down
             (TodoMode::Normal, key!(Down) | key!(Char('j'))) => {
                 self.table_state.select_next();
+                self.find_table_state.select_next();
             }
             // Toggle done
             (TodoMode::Normal, key!(Enter)) => {
@@ -265,11 +346,40 @@ impl Todolist {
             (TodoMode::EditTask { buffer, .. }, key!(Char(ch))) => {
                 buffer.push(*ch);
             }
+            // Find task typing
+            (TodoMode::FindTask { buffer }, key!(Char(ch))) => {
+                buffer.push(*ch);
+            }
+            // Submit find task
+            (TodoMode::FindTask { buffer }, key!(Enter)) => {
+                self.find_mode = true;
+                self.find_input_mode = false;
+                if !buffer.is_empty() {
+                    let title = std::mem::take(buffer);
+                    self.try_find_todo(title.clone()).await?;
+                    self.mode = TodoMode::Normal;
+                }
+            }
+            // Scroll up
+            (TodoMode::FindTask  { buffer }, key!(Up) | key!(Char('k'))) => {
+                // self.find_mode = true;
+                self.table_state.select_previous();
+                self.find_table_state.select_previous();
+
+            }
+            // Scroll down
+            (TodoMode::FindTask  { buffer }, key!(Down) | key!(Char('j'))) => {
+                // self.find_mode = true;
+                self.table_state.select_next();
+                self.find_table_state.select_next();
+            }
+
             // Backspace
             (
-                TodoMode::CreateTask { buffer } | TodoMode::EditTask { buffer, .. },
+                TodoMode::CreateTask { buffer } | TodoMode::EditTask { buffer, .. } | TodoMode::FindTask { buffer },
                 key!(Backspace),
             ) => {
+                self.find_mode = false;
                 if buffer.is_empty() {
                     self.mode = TodoMode::Normal;
                 } else {
@@ -323,15 +433,24 @@ impl Todolist {
 
     /// Delete the task item currently selected in the list
     pub async fn try_delete_task(&mut self) -> Result<()> {
-        let tasks = self.tasks_rx.borrow().clone();
+
         let task_index = self
             .table_state
             .selected()
             .context("failed to get todolist selected index")?;
-        let selected_task = tasks
+
+        let selected_task = if self.find_mode {
+            self.find_results
             .get(task_index)
             .cloned()
-            .context("failed to find selected task")?;
+            .context("failed to get todo from list")?
+        } else {
+            self.tasks_rx
+            .borrow()
+            .get(task_index)
+            .cloned()
+            .context("failed to get todo from list")?
+        };
 
         let id = selected_task.id;
         self.ditto
@@ -343,6 +462,8 @@ impl Todolist {
                 }),
             ))
             .await?;
+
+        // self.try_find_todo(title.clone()).await?;
 
         Ok(())
     }
@@ -374,6 +495,37 @@ impl Todolist {
                 }),
             ))
             .await?;
+
+        Ok(())
+    }
+
+
+
+    /// Search for todos with text
+    pub async fn try_find_todo(&mut self, title: String) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Args {
+            pattern: String,
+        }
+
+        let args = Args {
+            pattern: format!("{}%", title)
+        };
+
+        let result = self.ditto
+            .store()
+            .execute_v2((
+                "SELECT * FROM tasks WHERE title LIKE :pattern AND deleted=false ORDER BY _id",
+                args,
+            ))
+            .await?;
+
+        let found_tasks = result
+            .into_iter()
+            .flat_map(|it| it.deserialize_value::<TodoItem>().ok())
+            .collect::<Vec<_>>();
+
+        self.find_results = found_tasks;
 
         Ok(())
     }
